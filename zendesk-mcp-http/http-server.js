@@ -293,6 +293,52 @@ app.post('/mcp', express.json(), async (req, res) => {
                 },
                 required: ['article_id']
               }
+            },
+            {
+              name: 'count_tickets',
+              description: 'Count tickets matching a search query. Returns total count without fetching full ticket data. Use Zendesk search syntax (e.g., "status:open priority:high", "created>2024-01-01", "type:incident assignee:me").',
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  query: { type: 'string', description: 'Zendesk search query string' }
+                },
+                required: ['query']
+              }
+            },
+            {
+              name: 'get_ticket_metrics',
+              description: 'Get performance metrics for tickets including reply time, resolution time, and reopen count. Retrieve metrics for a specific ticket by ID, or get paginated metrics for all tickets (up to 100 per request).',
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  ticket_id: { type: 'number', description: 'Optional: specific ticket ID to get metrics for. Omit to get paginated metrics for all tickets.' }
+                }
+              }
+            },
+            {
+              name: 'get_satisfaction_ratings',
+              description: 'Get customer satisfaction ratings (CSAT scores). Filter by score (good/bad), time range, or retrieve all ratings. Returns rating details including score, comment, ticket ID, and timestamp.',
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  score: { type: 'string', description: 'Filter by score: "good" or "bad"', enum: ['good', 'bad'] },
+                  start_time: { type: 'string', description: 'Filter ratings created after this timestamp (Unix epoch or ISO 8601)' },
+                  end_time: { type: 'string', description: 'Filter ratings created before this timestamp (Unix epoch or ISO 8601)' }
+                }
+              }
+            },
+            {
+              name: 'export_ticket_stats',
+              description: 'Export aggregated ticket statistics for a date range (max 31 days). Groups tickets by day and optionally by group/tags/priority/type. Returns counts and trends, not individual tickets. Useful for reporting and trend analysis.',
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  start_date: { type: 'string', description: 'Start date in YYYY-MM-DD format or Unix timestamp' },
+                  end_date: { type: 'string', description: 'End date in YYYY-MM-DD format or Unix timestamp' },
+                  group_by: { type: 'string', description: 'Optional field to group stats by: group, tags, priority, or type', enum: ['group', 'tags', 'priority', 'type'] }
+                },
+                required: ['start_date', 'end_date']
+              }
             }
           ]
         },
@@ -343,6 +389,124 @@ app.post('/mcp', express.json(), async (req, res) => {
         const response = await zendeskAPI.get(`/help_center/articles/${args.article_id}.json`);
         console.log('✅ get_article_details succeeded');
         result = { content: [{ type: 'text', text: JSON.stringify(response.data.article, null, 2) }] };
+      } else if (name === 'count_tickets') {
+        const response = await zendeskAPI.get('/search/count.json', {
+          params: { query: args.query }
+        });
+        console.log('✅ count_tickets succeeded');
+        result = {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              query: args.query,
+              count: response.data.count
+            }, null, 2)
+          }]
+        };
+      } else if (name === 'get_ticket_metrics') {
+        let response;
+        if (args.ticket_id) {
+          // Get metrics for a specific ticket
+          response = await zendeskAPI.get(`/tickets/${args.ticket_id}/metrics.json`);
+          console.log('✅ get_ticket_metrics (single) succeeded');
+          result = { content: [{ type: 'text', text: JSON.stringify(response.data.ticket_metric, null, 2) }] };
+        } else {
+          // Get paginated metrics for all tickets (limit to 100)
+          response = await zendeskAPI.get('/ticket_metrics.json', {
+            params: { per_page: 100 }
+          });
+          console.log('✅ get_ticket_metrics (paginated) succeeded');
+          result = { content: [{ type: 'text', text: JSON.stringify(response.data.ticket_metrics, null, 2) }] };
+        }
+      } else if (name === 'get_satisfaction_ratings') {
+        const params = { per_page: 100 };
+        if (args.score) params.score = args.score;
+        if (args.start_time) params.start_time = args.start_time;
+        if (args.end_time) params.end_time = args.end_time;
+
+        const response = await zendeskAPI.get('/satisfaction_ratings.json', { params });
+        console.log('✅ get_satisfaction_ratings succeeded');
+        result = { content: [{ type: 'text', text: JSON.stringify(response.data.satisfaction_ratings, null, 2) }] };
+      } else if (name === 'export_ticket_stats') {
+        // Parse dates and validate range
+        const startDate = new Date(args.start_date);
+        const endDate = new Date(args.end_date);
+        const daysDiff = Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24));
+
+        if (daysDiff > 31) {
+          throw new Error('Date range cannot exceed 31 days');
+        }
+
+        // Convert to Unix timestamps
+        const startTime = Math.floor(startDate.getTime() / 1000);
+
+        // Fetch tickets using incremental export API
+        const tickets = [];
+        let nextPage = `/incremental/tickets.json?start_time=${startTime}`;
+
+        while (nextPage && tickets.length < 10000) { // Safety cap
+          const response = await zendeskAPI.get(nextPage);
+          const fetchedTickets = response.data.tickets.filter(t => {
+            const createdAt = new Date(t.created_at);
+            return createdAt >= startDate && createdAt <= endDate;
+          });
+          tickets.push(...fetchedTickets);
+
+          // Check if we've passed the end date
+          const lastTicket = response.data.tickets[response.data.tickets.length - 1];
+          if (lastTicket && new Date(lastTicket.created_at) > endDate) {
+            break;
+          }
+
+          nextPage = response.data.next_page;
+        }
+
+        // Aggregate statistics
+        const statsByDay = {};
+        const statsByGroup = args.group_by ? {} : null;
+
+        tickets.forEach(ticket => {
+          const day = ticket.created_at.split('T')[0]; // YYYY-MM-DD
+
+          // Count by day
+          if (!statsByDay[day]) {
+            statsByDay[day] = { count: 0, statuses: {} };
+          }
+          statsByDay[day].count++;
+          const status = ticket.status || 'unknown';
+          statsByDay[day].statuses[status] = (statsByDay[day].statuses[status] || 0) + 1;
+
+          // Count by group_by field
+          if (args.group_by && statsByGroup) {
+            let groupKey;
+            if (args.group_by === 'group') {
+              groupKey = ticket.group_id || 'unassigned';
+            } else if (args.group_by === 'tags') {
+              groupKey = ticket.tags?.join(',') || 'no_tags';
+            } else if (args.group_by === 'priority') {
+              groupKey = ticket.priority || 'none';
+            } else if (args.group_by === 'type') {
+              groupKey = ticket.type || 'unknown';
+            }
+
+            if (groupKey) {
+              statsByGroup[groupKey] = (statsByGroup[groupKey] || 0) + 1;
+            }
+          }
+        });
+
+        const summary = {
+          date_range: { start: args.start_date, end: args.end_date },
+          total_tickets: tickets.length,
+          by_day: statsByDay
+        };
+
+        if (statsByGroup) {
+          summary[`by_${args.group_by}`] = statsByGroup;
+        }
+
+        console.log('✅ export_ticket_stats succeeded');
+        result = { content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }] };
       } else {
         throw new Error(`Unknown tool: ${name}`);
       }

@@ -7,7 +7,7 @@ A remote HTTP MCP server for Zendesk with built-in OAuth 2.0 authentication supp
 ### 1. Start the Server
 
 ```bash
-cd ~/MCP/zemdesk-mcp-hhtp
+cd ~/Zendesk-MCP-Server/zendesk-mcp-http
 npm install
 npm start
 ```

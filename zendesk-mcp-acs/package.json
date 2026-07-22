@@ -1,0 +1,16 @@
+{
+  "name": "zendesk-mcp-http-server",
+  "version": "1.0.0",
+  "description": "Zendesk MCP HTTP server with OAuth support",
+  "type": "module",
+  "main": "http-server.js",
+  "scripts": {
+    "start": "node http-server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.3",
+    "express": "^4.18.2",
+    "axios": "^1.13.4",
+    "dotenv": "^17.2.3"
+  }
+}
